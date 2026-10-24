@@ -1,10 +1,17 @@
 """Turner HSEP Safety Inscriber / Site Plan Builder (pywebview + React)."""
 import base64
 import os
+import sys
 
 import webview
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    # Bundled exe: web UI lives in the PyInstaller bundle, templates sit next to the exe.
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", BASE_DIR)
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    RESOURCE_DIR = BASE_DIR
 
 
 def _dialog_type(name):
@@ -59,7 +66,7 @@ class Api:
             return {"ok": False, "error": str(exc)}
 
 
-with open(os.path.join(BASE_DIR, "web", "index.html"), encoding="utf-8") as _f:
+with open(os.path.join(RESOURCE_DIR, "web", "index.html"), encoding="utf-8") as _f:
     HTML = _f.read()
 
 
