@@ -1,0 +1,401 @@
+"""Turner HSEP Safety Inscriber / Site Plan Builder (pywebview + React)."""
+import base64
+import os
+
+import webview
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _dialog_type(name):
+    enum = getattr(webview, "FileDialog", None)
+    if enum is not None and hasattr(enum, name):
+        return getattr(enum, name)
+    return getattr(webview, name + "_DIALOG")
+
+
+class Api:
+    def list_templates(self):
+        found = []
+        for folder in (BASE_DIR, os.path.join(BASE_DIR, "templates")):
+            if not os.path.isdir(folder):
+                continue
+            for name in sorted(os.listdir(folder)):
+                if name.lower().endswith(".pdf"):
+                    found.append({"name": name, "path": os.path.join(folder, name)})
+        return found
+
+    def read_pdf(self, path):
+        try:
+            with open(path, "rb") as f:
+                return {"ok": True, "data": base64.b64encode(f.read()).decode("ascii")}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+    def open_dialog(self):
+        try:
+            res = webview.windows[0].create_file_dialog(
+                _dialog_type("OPEN"), allow_multiple=True,
+                file_types=("PDF Files (*.pdf)",))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "files": []}
+        files = [{"name": os.path.basename(p), "path": p} for p in (res or [])]
+        return {"ok": True, "files": files}
+
+    def save_dialog(self, b64, suggested):
+        try:
+            res = webview.windows[0].create_file_dialog(
+                _dialog_type("SAVE"), save_filename=suggested,
+                file_types=("PDF Files (*.pdf)",))
+            if not res:
+                return {"ok": False, "cancelled": True}
+            path = res if isinstance(res, str) else res[0]
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            return {"ok": True, "path": path}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+
+
+HTML = r"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Turner HSEP Safety Inscriber</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#eef1f4;color:#1b2430}
+.app{display:flex;flex-direction:column;height:100vh}
+.bar{display:flex;gap:8px;align-items:center;padding:8px 12px;background:#0b3d6b;color:#fff}
+.bar h1{font-size:16px;margin:0 12px 0 0}.bar select,.bar button{padding:5px 10px}
+.main{display:flex;flex:1;min-height:0}
+.view{flex:1;overflow:auto;padding:12px;text-align:center}
+.pagewrap{position:relative;display:inline-block;background:#fff;box-shadow:0 1px 6px #0004}
+.pagewrap canvas{display:block}
+.ov{position:absolute;border:1px solid #1e7be0;background:#dcebff99;font-size:11px;padding:0 2px}
+.ov.active{outline:2px solid #e07b1e}
+.side{width:340px;background:#fff;border-left:1px solid #ccd;padding:12px;overflow:auto}
+.side label{display:block;font-weight:600;margin:8px 0 4px;word-break:break-all}
+.side input[type=text],.side select{width:100%;padding:6px}
+.nav{display:flex;gap:6px;margin-top:10px}.nav button{flex:1;padding:6px}
+.msg{padding:4px 12px;background:#fff3cd;font-size:13px}
+</style></head><body><div id="root"></div>
+<script>
+(function(){
+var h = React.createElement, useState = React.useState, useEffect = React.useEffect,
+    useRef = React.useRef, useCallback = React.useCallback;
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+var PDFLib = window.PDFLib;
+
+/* ---- pywebview readiness ---- */
+function whenApi(){
+  return new Promise(function(resolve){
+    function ok(){ return window.pywebview && window.pywebview.api && window.pywebview.api.list_templates; }
+    if (ok()) return resolve(window.pywebview.api);
+    var done = false;
+    function fin(){ if (!done && ok()) { done = true; clearInterval(t); resolve(window.pywebview.api); } }
+    window.addEventListener("pywebviewready", fin);
+    var t = setInterval(fin, 100);
+  });
+}
+
+/* ---- helpers ---- */
+function bytesToBase64(bytes){
+  var s = "", chunk = 0x8000;
+  for (var i = 0; i < bytes.length; i += chunk)
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return btoa(s);
+}
+function base64ToBytes(b64){
+  var bin = atob(b64), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function canonical(name){
+  return name.replace(/\[\d+\]/g, "").replace(/\.\d+$/, "").replace(/[_\s]+\d+$/, "")
+             .replace(/\s+/g, " ").trim().toLowerCase();
+}
+var HEAT_FIELDS = [
+  {name: "Heat Stress Supervisor", rect: [60, 640, 300, 660]},
+  {name: "Heat Stress Water Location", rect: [60, 600, 300, 620]},
+  {name: "Heat Stress Rest Area", rect: [60, 560, 300, 580]},
+  {name: "Heat Stress Emergency Contact", rect: [60, 520, 300, 540]}
+];
+function isHsep505(name){ return /hsep/i.test(name) && /5[\._ -]?05/.test(name); }
+
+function addHeatFields(doc, fileName){
+  try {
+    if (!isHsep505(fileName)) return;
+    var pages = doc.getPages();
+    if (pages.length < 2) return;
+    var form = doc.getForm(), page = pages[1];
+    HEAT_FIELDS.forEach(function(f){
+      try {
+        var existing = null;
+        try { existing = form.getTextField(f.name); } catch (e) { existing = null; }
+        if (existing) return;
+        var tf = form.createTextField(f.name);
+        tf.addToPage(page, {x: f.rect[0], y: f.rect[1], width: f.rect[2]-f.rect[0],
+                            height: f.rect[3]-f.rect[1], borderWidth: 1});
+      } catch (e) { console.warn("heat field failed", f.name, e); }
+    });
+  } catch (e) { console.warn("heat fields", e); }
+}
+
+function pageIndexOf(doc, field, widget, pageRefMap){
+  try {
+    var p = widget.P && widget.P();
+    if (p) {
+      var key = p.toString();
+      if (pageRefMap.refs[key] !== undefined) return pageRefMap.refs[key];
+    }
+  } catch (e) {}
+  try {
+    var wref = doc.context.getObjectRef(widget.dict);
+    if (wref && pageRefMap.annots[wref.toString()] !== undefined)
+      return pageRefMap.annots[wref.toString()];
+  } catch (e) {}
+  return 0;
+}
+function buildPageRefMap(doc){
+  var m = {refs: {}, annots: {}};
+  doc.getPages().forEach(function(pg, i){
+    m.refs[pg.ref.toString()] = i;
+    try {
+      var annots = pg.node.Annots();
+      if (annots) for (var k = 0; k < annots.size(); k++) {
+        var r = annots.get(k); if (r) m.annots[r.toString()] = i;
+      }
+    } catch (e) {}
+  });
+  return m;
+}
+
+function detectFields(doc){
+  var out = [];
+  var form; try { form = doc.getForm(); } catch (e) { return out; }
+  var map = buildPageRefMap(doc);
+  form.getFields().forEach(function(field){
+    try {
+      var name = field.getName(), type = field.constructor.name, options = null, value = "";
+      if (type === "PDFTextField") value = field.getText() || "";
+      else if (type === "PDFCheckBox") value = field.isChecked();
+      else if (type === "PDFDropdown" || type === "PDFOptionList") {
+        options = field.getOptions(); var sel = field.getSelected(); value = sel[0] || "";
+      } else if (type === "PDFRadioGroup") { options = field.getOptions(); value = field.getSelected() || ""; }
+      else return;
+      var widgets = field.acroField.getWidgets();
+      widgets.forEach(function(w, wi){
+        var r = w.getRectangle();
+        out.push({name: name, key: canonical(name), type: type, options: options,
+                  page: pageIndexOf(doc, field, w, map), rect: [r.x, r.y, r.x + r.width, r.y + r.height],
+                  widgetIndex: wi, value: value});
+      });
+    } catch (e) { console.warn("field skipped", e); }
+  });
+  return out;
+}
+
+function fillForm(doc, values){
+  var form = doc.getForm();
+  form.getFields().forEach(function(field){
+    var v = values[canonical(field.getName())];
+    if (v === undefined) return;
+    try {
+      var t = field.constructor.name;
+      if (t === "PDFTextField") field.setText(String(v));
+      else if (t === "PDFCheckBox") { if (v) field.check(); else field.uncheck(); }
+      else if (t === "PDFDropdown") { if (v === "") field.clear(); else field.select(String(v)); }
+      else if (t === "PDFOptionList") { if (v === "") field.clear(); else field.select(String(v)); }
+      else if (t === "PDFRadioGroup") { if (v === "") field.clear(); else field.select(String(v)); }
+    } catch (e) { console.warn("fill failed", field.getName(), e); }
+  });
+  try {
+    var font = null;
+    try { font = doc.embedStandardFont ? doc.embedStandardFont(PDFLib.StandardFonts.Helvetica) : null; } catch (e) {}
+    form.updateFieldAppearances(font || undefined);
+  } catch (e) { console.warn("appearances failed", e); }
+}
+
+/* ---- Page view ---- */
+function PageView(props){
+  var canvasRef = useRef(null);
+  var st = useState(null), vp = st[0], setVp = st[1];
+  useEffect(function(){
+    var cancelled = false, task = null;
+    if (!props.pdf) return;
+    props.pdf.getPage(props.page + 1).then(function(page){
+      if (cancelled) return;
+      var viewport = page.getViewport({scale: props.scale});
+      var c = canvasRef.current; if (!c) return;
+      c.width = viewport.width; c.height = viewport.height;
+      task = page.render({canvasContext: c.getContext("2d"), viewport: viewport});
+      task.promise.then(function(){ if (!cancelled) setVp(viewport); }, function(){});
+      setVp(viewport);
+    });
+    return function(){ cancelled = true; if (task) try { task.cancel(); } catch (e) {} };
+  }, [props.pdf, props.page, props.scale]);
+  var overlays = [];
+  if (vp) props.fields.forEach(function(f, i){
+    if (f.page !== props.page) return;
+    var r = vp.convertToViewportRectangle(f.rect);
+    var left = Math.min(r[0], r[2]), top = Math.min(r[1], r[3]);
+    var w = Math.abs(r[2] - r[0]), hh = Math.abs(r[3] - r[1]);
+    var val = props.values[f.key], style = {left: left, top: top, width: w, height: hh};
+    var cls = "ov" + (props.activeKey === f.key ? " active" : "");
+    var el;
+    if (f.type === "PDFCheckBox")
+      el = h("input", {type: "checkbox", checked: !!val, onChange: function(e){ props.onChange(f.key, e.target.checked); }});
+    else if (f.options)
+      el = h("select", {value: val || "", style: {width: "100%", height: "100%"},
+        onChange: function(e){ props.onChange(f.key, e.target.value); }},
+        [h("option", {key: "", value: ""}, "")].concat(f.options.map(function(o){ return h("option", {key: o, value: o}, o); })));
+    else
+      el = h("input", {type: "text", value: val || "", style: {width: "100%", height: "100%", border: 0, background: "transparent"},
+        onChange: function(e){ props.onChange(f.key, e.target.value); }});
+    overlays.push(h("div", {key: i, className: cls, style: style, onFocus: function(){ props.onFocus(f.key); }}, el));
+  });
+  return h("div", {className: "pagewrap"}, h("canvas", {ref: canvasRef}), overlays);
+}
+
+function App(){
+  var s = useState([]), files = s[0], setFiles = s[1];
+  var s2 = useState(""), cur = s2[0], setCur = s2[1];
+  var s3 = useState(null), doc = s3[0], setDoc = s3[1];
+  var s4 = useState(null), pdf = s4[0], setPdf = s4[1];
+  var s5 = useState([]), fields = s5[0], setFields = s5[1];
+  var s6 = useState({}), values = s6[0], setValues = s6[1];
+  var s7 = useState(0), page = s7[0], setPage = s7[1];
+  var s8 = useState(0), idx = s8[0], setIdx = s8[1];
+  var s9 = useState(""), msg = s9[0], setMsg = s9[1];
+  var sa = useState(1.25), scale = sa[0], setScale = sa[1];
+  var apiRef = useRef(null);
+
+  var canonList = [], seen = {};
+  fields.forEach(function(f){ if (!seen[f.key]) { seen[f.key] = f; canonList.push(f); } });
+  var active = canonList[idx] || null;
+
+  useEffect(function(){
+    whenApi().then(function(api){
+      apiRef.current = api;
+      return api.list_templates();
+    }).then(function(list){
+      setFiles(list || []);
+      if (list && list.length) loadFile(list[0]);
+    }).catch(function(e){ setMsg("Startup error: " + e); });
+  }, []);
+
+  function loadFile(f){
+    setMsg("Loading " + f.name + "…"); setCur(f.path);
+    whenApi().then(function(api){ return api.read_pdf(f.path); }).then(function(res){
+      if (!res.ok) throw new Error(res.error);
+      var bytes = base64ToBytes(res.data);
+      return PDFLib.PDFDocument.load(bytes, {ignoreEncryption: true}).then(function(d){
+        addHeatFields(d, f.name);
+        return d.save().then(function(saved){
+          var flds = detectFields(d);
+          return pdfjsLib.getDocument({data: saved.slice()}).promise.then(function(p){
+            var vals = {};
+            flds.forEach(function(x){ if (vals[x.key] === undefined) vals[x.key] = x.value; });
+            setDoc(d); setPdf(p); setFields(flds); setValues(vals); setPage(0); setIdx(0);
+            setMsg(flds.length ? "" : "No form fields found in this PDF.");
+          });
+        });
+      });
+    }).catch(function(e){ setMsg("Failed to load: " + e); });
+  }
+
+  function openDialog(){
+    whenApi().then(function(api){ return api.open_dialog(); }).then(function(res){
+      if (!res.ok) return setMsg("Open failed: " + res.error);
+      if (!res.files.length) return;
+      setFiles(function(prev){
+        var next = prev.slice();
+        res.files.forEach(function(f){ if (!next.some(function(n){ return n.path === f.path; })) next.push(f); });
+        return next;
+      });
+      loadFile(res.files[0]);
+    });
+  }
+
+  function setValue(key, v){
+    setValues(function(prev){ var n = Object.assign({}, prev); n[key] = v; return n; });
+  }
+  function goto(i){
+    if (i < 0 || i >= canonList.length) return;
+    setIdx(i); setPage(canonList[i].page);
+  }
+
+  function save(){
+    if (!doc) return;
+    try {
+      fillForm(doc, values);
+    } catch (e) { setMsg("Fill error: " + e); }
+    doc.save().then(function(bytes){
+      var f = files.filter(function(x){ return x.path === cur; })[0];
+      var base = (f ? f.name : "filled.pdf").replace(/\.pdf$/i, "") + "_filled.pdf";
+      return whenApi().then(function(api){ return api.save_dialog(bytesToBase64(bytes), base); });
+    }).then(function(res){
+      if (!res) return;
+      if (res.ok) setMsg("Saved to " + res.path);
+      else if (!res.cancelled) setMsg("Save failed: " + res.error);
+    }).catch(function(e){ setMsg("Save failed: " + e); });
+  }
+
+  var numPages = pdf ? pdf.numPages : 0;
+  var side = [];
+  if (active) {
+    var v = values[active.key];
+    var input;
+    if (active.type === "PDFCheckBox")
+      input = h("input", {type: "checkbox", checked: !!v, onChange: function(e){ setValue(active.key, e.target.checked); }});
+    else if (active.options)
+      input = h("select", {value: v || "", onChange: function(e){ setValue(active.key, e.target.value); }},
+        [h("option", {key: "", value: ""}, "")].concat(active.options.map(function(o){ return h("option", {key: o, value: o}, o); })));
+    else
+      input = h("input", {type: "text", value: v || "", onChange: function(e){ setValue(active.key, e.target.value); }});
+    side = [h("div", {key: "c"}, "Field " + (idx + 1) + " of " + canonList.length + " (page " + (active.page + 1) + ")"),
+            h("label", {key: "l"}, active.name), input];
+  } else side = [h("div", {key: "n"}, "No fields to walk through.")];
+
+  return h("div", {className: "app"},
+    h("div", {className: "bar"},
+      h("h1", null, "Turner HSEP Safety Inscriber"),
+      h("select", {value: cur, onChange: function(e){
+          var f = files.filter(function(x){ return x.path === e.target.value; })[0]; if (f) loadFile(f); }},
+        files.map(function(f){ return h("option", {key: f.path, value: f.path}, f.name); })),
+      h("button", {onClick: openDialog}, "Open PDF…"),
+      h("button", {onClick: function(){ setPage(Math.max(0, page - 1)); }}, "◀"),
+      h("span", null, numPages ? "Page " + (page + 1) + "/" + numPages : ""),
+      h("button", {onClick: function(){ setPage(Math.min(numPages - 1, page + 1)); }}, "▶"),
+      h("button", {onClick: function(){ setScale(scale + 0.25); }}, "+"),
+      h("button", {onClick: function(){ setScale(Math.max(0.5, scale - 0.25)); }}, "−"),
+      h("button", {onClick: save, disabled: !doc}, "Save PDF")),
+    msg ? h("div", {className: "msg"}, msg) : null,
+    h("div", {className: "main"},
+      h("div", {className: "view"}, pdf ? h(PageView, {pdf: pdf, page: page, scale: scale, fields: fields,
+        values: values, activeKey: active && active.key, onChange: setValue,
+        onFocus: function(k){ for (var i = 0; i < canonList.length; i++) if (canonList[i].key === k) setIdx(i); }}) : null),
+      h("div", {className: "side"}, side,
+        h("div", {className: "nav"},
+          h("button", {onClick: function(){ goto(idx - 1); }, disabled: idx <= 0}, "Previous"),
+          h("button", {onClick: function(){ goto(idx + 1); }, disabled: idx >= canonList.length - 1}, "Next")))));
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+})();
+</script></body></html>
+"""
+
+
+def main():
+    api = Api()
+    webview.create_window(
+        "Turner HSEP Safety Inscriber", html=HTML, js_api=api, width=1280, height=900)
+    webview.start()
+
+
+if __name__ == "__main__":
+    main()
