@@ -43,3 +43,10 @@ falls back to file upload for **Open PDF…** and a download for **Save PDF**.
   `npx netlify-cli deploy --prod`.
 - Template PDFs in `templates/` are copied to the site at build time. List their file names in
   `templates/index.json`, e.g. `["HSEP 5.05.pdf"]`, to have them preload on the site.
+
+## Install with a desktop shortcut
+
+Download/clone this repo to a permanent folder, then run `python install.py`. It creates a
+local virtual environment, installs the requirements, and puts a "Site Plan Builder" shortcut on
+your Desktop (`.lnk` on Windows, `.command` on macOS, `.desktop` on Linux). The shortcut runs the
+app from that folder, so don't move or delete it afterwards.
