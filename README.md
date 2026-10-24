@@ -33,3 +33,13 @@ File names containing `HSEP` and `5.05` get the custom heat-stress fields inject
 
 The frontend libraries (React, pdf.js, pdf-lib) are loaded from CDNs (cdnjs / unpkg), so the
 first launch requires an internet connection.
+
+## Web version (Netlify)
+
+`web/index.html` is the same UI and is used by `main.py`. In a normal browser (no pywebview) it
+falls back to file upload for **Open PDF…** and a download for **Save PDF**.
+
+- Deploy: connect the repo in Netlify (settings come from `netlify.toml`; publish dir `web`), or run
+  `npx netlify-cli deploy --prod`.
+- Template PDFs in `templates/` are copied to the site at build time. List their file names in
+  `templates/index.json`, e.g. `["HSEP 5.05.pdf"]`, to have them preload on the site.

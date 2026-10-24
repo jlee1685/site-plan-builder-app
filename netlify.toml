@@ -1,0 +1,3 @@
+[build]
+  publish = "web"
+  command = "mkdir -p web/templates && cp -r templates/. web/templates/"
