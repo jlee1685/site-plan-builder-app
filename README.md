@@ -50,3 +50,10 @@ Download/clone this repo to a permanent folder, then run `python install.py`. It
 local virtual environment, installs the requirements, and puts a "Site Plan Builder" shortcut on
 your Desktop (`.lnk` on Windows, `.command` on macOS, `.desktop` on Linux). The shortcut runs the
 app from that folder, so don't move or delete it afterwards.
+
+## Windows exe
+
+The `Build Windows exe` GitHub Action builds `SitePlanBuilder.exe` with PyInstaller. Run it from
+the repo's **Actions** tab (*Run workflow*) and download the `SitePlanBuilder-windows` artifact, or
+push a tag like `v1.0` to publish the exe on the Releases page. Put a `templates/` folder next to
+the exe to preload template PDFs. Internet is still required for the frontend CDN libraries.
